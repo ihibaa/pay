@@ -1,0 +1,97 @@
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { prisma } from "@/app/lib/prisma";
+
+const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
+
+export async function GET() {
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("paynext_token")?.value;
+
+    if (!token) {
+      return NextResponse.json(
+        { error: "Please login first." },
+        { status: 401 }
+      );
+    }
+
+    const { payload } = await jwtVerify(token, secret);
+    const userId = payload.userId;
+
+    if (typeof userId !== "string") {
+      return NextResponse.json(
+        { error: "Invalid session." },
+        { status: 401 }
+      );
+    }
+
+    const admin = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+
+    if (!admin || admin.role !== "ADMIN") {
+      return NextResponse.json(
+        { error: "Admin access required." },
+        { status: 403 }
+      );
+    }
+
+    const [
+      totalUsers,
+      totalTransactions,
+      pendingKyc,
+      totalFraudAlerts,
+      recentTransactions,
+      recentAlerts,
+      recentLogs,
+    ] = await Promise.all([
+      prisma.user.count(),
+      prisma.transaction.count(),
+      prisma.kycApplication.count({
+        where: { status: "PENDING" },
+      }),
+      prisma.fraudAlert.count({
+        where: { status: "REVIEW" },
+      }),
+      prisma.transaction.findMany({
+        take: 5,
+        orderBy: { createdAt: "desc" },
+        include: {
+          sender: {
+            select: { fullName: true, email: true },
+          },
+        },
+      }),
+      prisma.fraudAlert.findMany({
+        take: 5,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.securityLog.findMany({
+        take: 10,
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    return NextResponse.json({
+      stats: {
+        totalUsers,
+        totalTransactions,
+        pendingKyc,
+        totalFraudAlerts,
+      },
+      recentTransactions,
+      recentAlerts,
+      recentLogs,
+    });
+  } catch (error) {
+    console.error("Admin overview error:", error);
+
+    return NextResponse.json(
+      { error: "Unable to load admin dashboard." },
+      { status: 500 }
+    );
+  }
+}
